@@ -817,10 +817,9 @@ classdef DuctNetwork < handle
         
         function [MultiS, cnfg_X, R] = Identification(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
             [MultiS, cnfg_X, R] = Identification_Cascaded(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
-            %             [MultiS, cnfg_X, R] = Identification_Hybrid(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
         end
         
-        function [MultiS, cnfg_X, R] = Identification_Hybrid(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
+        function [MultiS, cnfg_X, R] = Identification_Cascaded(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
             % cnfg_s_mIdx is matrix of size cnfg by s, each of the cell indicates the identified parameter and its index in s_MultiS for each configuration
             % proc_ConfigIdx is vector of size proc by 1, indicating each process uses which configuration.
             % proc_ob_Measurements is matrix of size proc by ob, storing the measured data in each process
@@ -828,71 +827,46 @@ classdef DuctNetwork < handle
             % ob_SensorType is vector or cell array of size ob by 1, indicating the type of each sensor, Pressure sensor: 1|'Pressure'|'p', Flowrate sensor: 0|'Flowrate'|'q'
             % ob_Uncertainty is vector of size ob by 1, indicating the uncertainty for each sensor.
             %             Backup = obj.BackupParameterIdentification();
-            obj.Identification_Preprocess(cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
+            obj.Identification_Preprocess(cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty(:));
+            n_tot = sum(obj.s_m);
             if verLessThan('matlab','9')
                 options = optimoptions(@lsqnonlin,'Display',obj.Display,...
                     'Algorithm','trust-region-reflective',...
                     'TolFun',1e-12,'TolX',1e-12,...
-                    'MaxIter',10,...
-                    'Jacobian','on',...
+                    'MaxIter',n_tot*20+50,...
+                    'Jacobian','on','DerivativeCheck','off',...
+                    'FinDiffType','central','FinDiffRelStep',1e-10,...
                     'OutputFcn',[]);
             else
                 options = optimoptions(@lsqnonlin,'Display',obj.Display,...
                     'Algorithm','trust-region-reflective',...
                     'FunctionTolerance',1e-12,'StepTolerance',1e-12,...
                     'OptimalityTolerance',1e-12,...
-                    'MaxIterations',10,'OutputFcn',[],...
-                    'SpecifyObjectiveGradient',true);
+                    'MaxIterations',n_tot*20+50,'OutputFcn',[],...
+                    'SpecifyObjectiveGradient',true,'CheckGradients',false,...
+                    'FiniteDifferenceType','central','FiniteDifferenceStepSize',1e-10);
+%                 ,...
+%                     'PlotFcn',{@optimplotx,@optimplotfval,@optimplotresnorm,@optimplotfirstorderopt}
             end
             exitflag = -1;
-            n_tot_S = sum(obj.s_m);
-            n_tot_X = obj.cnfg*obj.t;
             if isempty(obj.X)
-                S0 = ones(n_tot_S,1);
-                X0 = ones(n_tot_X,1);
+                R0 = ones(n_tot,1);
             else
-                S0 = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S,obj.s_m,'UniformOutput',false));
-                X0 = repmat(obj.X,obj.cnfg,1);
+                R0 = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S,obj.s_m,'UniformOutput',false));
             end
-            ub_S = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_ub,obj.s_m,'UniformOutput',false));
-            lb_S = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_lb,obj.s_m,'UniformOutput',false));
-            ub_X = repmat(obj.X_ub,obj.cnfg,1);
-            lb_X = repmat(obj.X_lb,obj.cnfg,1);
-            obj.StateResidualControlScale = 10;
-            curr = inf; resnorm = 1e10;
+            ub = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_ub,obj.s_m,'UniformOutput',false));
+            lb = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_lb,obj.s_m,'UniformOutput',false));
             while exitflag<=0
-                R = lsqnonlin(@obj.res_Identification,[X0;S0],[lb_X;lb_S],[ub_X;ub_S],optimoptions(options,'MaxIterations',max(20,round(-3*log(resnorm)))));
-                prev = curr; curr = norm(obj.res_Identification_Cascaded(R(n_tot_X+1:n_tot_S+n_tot_X)))^2;
-                if curr<prev % accept the update by res_Identification
-                    S0 = R(n_tot_X+1:n_tot_S+n_tot_X);
-                    if strcmp(obj.Display,'iter')
-                        disp('Accept Update by res_Identification');
-                    end
-                else
-                    if strcmp(obj.Display,'iter')
-                        disp('Reject Update by res_Identification');
-                    end
-                end
-                [S0,resnorm] = lsqnonlin(@obj.res_Identification_Cascaded,S0,lb_S,ub_S,options);
-                %                 if strcmp(obj.Display,'iter')
-                %                     disp(S0');
-                %                     system('pause');
-                %                 end
-                cnfg_S = repmat({obj.S},obj.cnfg,1);IdentSIdx = obj.s_m>0;
-                for ii = 1:obj.cnfg
-                    cnfg_S{ii}(IdentSIdx)=S0(obj.cnfg_MultiSIdx{ii}(IdentSIdx));
-                end
-                backup.Display = obj.Display; obj.Display = 'none';
-                cnfg_X = cellfun(@obj.Sim,cnfg_S,'UniformOutput',false); obj.Display = backup.Display;
-                X0 = cell2mat(cnfg_X);
-                
-                if resnorm<1e-4
-                    exitflag = 1;
+                [R,resnorm] = lsqnonlin(@obj.res_Identification_Cascaded,R0,lb,ub,options);
+                exitflag = 1;
+                if resnorm<1e-3
                     continue;
                 end
             end
-            MultiS = S0;
+            [~,~,cnfg_X] = obj.res_Identification_Cascaded(R);
+            MultiS = R;
             obj.s_MultiS=mat2cell(MultiS,obj.s_m,1);
+            %             obj.RecoverParameterIdentification(Backup);
         end
         
         function [Backup] = Identification_Preprocess(obj,cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
