@@ -817,9 +817,10 @@ classdef DuctNetwork < handle
         
         function [MultiS, cnfg_X, R] = Identification(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
             [MultiS, cnfg_X, R] = Identification_Cascaded(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
+            %             [MultiS, cnfg_X, R] = Identification_Hybrid(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
         end
         
-        function [MultiS, cnfg_X, R] = Identification_Cascaded(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
+        function [MultiS, cnfg_X, R] = Identification_Hybrid(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
             % cnfg_s_mIdx is matrix of size cnfg by s, each of the cell indicates the identified parameter and its index in s_MultiS for each configuration
             % proc_ConfigIdx is vector of size proc by 1, indicating each process uses which configuration.
             % proc_ob_Measurements is matrix of size proc by ob, storing the measured data in each process
@@ -827,13 +828,88 @@ classdef DuctNetwork < handle
             % ob_SensorType is vector or cell array of size ob by 1, indicating the type of each sensor, Pressure sensor: 1|'Pressure'|'p', Flowrate sensor: 0|'Flowrate'|'q'
             % ob_Uncertainty is vector of size ob by 1, indicating the uncertainty for each sensor.
             %             Backup = obj.BackupParameterIdentification();
-            obj.Identification_Preprocess(cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty(:));
-            n_tot = sum(obj.s_m);
+            obj.Identification_Preprocess(cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
             if verLessThan('matlab','9')
                 options = optimoptions(@lsqnonlin,'Display',obj.Display,...
                     'Algorithm','trust-region-reflective',...
                     'TolFun',1e-12,'TolX',1e-12,...
-                    'MaxIter',n_tot*20+50,...
+                    'MaxIter',10,...
+                    'Jacobian','on',...
+                    'OutputFcn',[]);
+            else
+                options = optimoptions(@lsqnonlin,'Display',obj.Display,...
+                    'Algorithm','trust-region-reflective',...
+                    'FunctionTolerance',1e-12,'StepTolerance',1e-12,...
+                    'OptimalityTolerance',1e-12,...
+                    'MaxIterations',10,'OutputFcn',[],...
+                    'SpecifyObjectiveGradient',true);
+            end
+            exitflag = -1;
+            n_tot_S = sum(obj.s_m);
+            n_tot_X = obj.cnfg*obj.t;
+            if isempty(obj.X)
+                S0 = ones(n_tot_S,1);
+                X0 = ones(n_tot_X,1);
+            else
+                S0 = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S,obj.s_m,'UniformOutput',false));
+                X0 = repmat(obj.X,obj.cnfg,1);
+            end
+            ub_S = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_ub,obj.s_m,'UniformOutput',false));
+            lb_S = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_lb,obj.s_m,'UniformOutput',false));
+            ub_X = repmat(obj.X_ub,obj.cnfg,1);
+            lb_X = repmat(obj.X_lb,obj.cnfg,1);
+            obj.StateResidualControlScale = 10;
+            curr = inf; resnorm = 1e10;
+            while exitflag<=0
+                R = lsqnonlin(@obj.res_Identification,[X0;S0],[lb_X;lb_S],[ub_X;ub_S],optimoptions(options,'MaxIterations',max(20,round(-3*log(resnorm)))));
+                prev = curr; curr = norm(obj.res_Identification_Cascaded(R(n_tot_X+1:n_tot_S+n_tot_X)))^2;
+                if curr<prev % accept the update by res_Identification
+                    S0 = R(n_tot_X+1:n_tot_S+n_tot_X);
+                    if strcmp(obj.Display,'iter')
+                        disp('Accept Update by res_Identification');
+                    end
+                else
+                    if strcmp(obj.Display,'iter')
+                        disp('Reject Update by res_Identification');
+                    end
+                end
+                [S0,resnorm] = lsqnonlin(@obj.res_Identification_Cascaded,S0,lb_S,ub_S,options);
+                %                 if strcmp(obj.Display,'iter')
+                %                     disp(S0');
+                %                     system('pause');
+                %                 end
+                cnfg_S = repmat({obj.S},obj.cnfg,1);IdentSIdx = obj.s_m>0;
+                for ii = 1:obj.cnfg
+                    cnfg_S{ii}(IdentSIdx)=S0(obj.cnfg_MultiSIdx{ii}(IdentSIdx));
+                end
+                backup.Display = obj.Display; obj.Display = 'none';
+                cnfg_X = cellfun(@obj.Sim,cnfg_S,'UniformOutput',false); obj.Display = backup.Display;
+                X0 = cell2mat(cnfg_X);
+                
+                if resnorm<1e-4
+                    exitflag = 1;
+                    continue;
+                end
+            end
+            MultiS = S0;
+            obj.s_MultiS=mat2cell(MultiS,obj.s_m,1);
+        end
+        
+        function [MultiS, cnfg_X, R] = Identification_TRR(obj, cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
+            % cnfg_s_mIdx is matrix of size cnfg by s, each of the cell indicates the identified parameter and its index in s_MultiS for each configuration
+            % proc_ConfigIdx is vector of size proc by 1, indicating each process uses which configuration.
+            % proc_ob_Measurements is matrix of size proc by ob, storing the measured data in each process
+            % proc_ob_SensorLocation is matrix of size proc by ob, indicating the position of sensors in each process
+            % ob_SensorType is vector or cell array of size ob by 1, indicating the type of each sensor, Pressure sensor: 1|'Pressure'|'p', Flowrate sensor: 0|'Flowrate'|'q'
+            % ob_Uncertainty is vector of size ob by 1, indicating the uncertainty for each sensor.
+            %             Backup = obj.BackupParameterIdentification();
+            obj.Identification_Preprocess(cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty);
+            n_tot = obj.cnfg*obj.t+sum(obj.s_m);
+            if verLessThan('matlab','9')
+                options = optimoptions(@lsqnonlin,'Display',obj.Display,...
+                    'Algorithm','trust-region-reflective',...
+                    'TolFun',1e-12,'TolX',1e-12,...
+                    'MaxIter',n_tot*25,...
                     'Jacobian','on','DerivativeCheck','off',...
                     'FinDiffType','central','FinDiffRelStep',1e-10,...
                     'OutputFcn',[]);
@@ -841,32 +917,172 @@ classdef DuctNetwork < handle
                 options = optimoptions(@lsqnonlin,'Display',obj.Display,...
                     'Algorithm','trust-region-reflective',...
                     'FunctionTolerance',1e-12,'StepTolerance',1e-12,...
-                    'OptimalityTolerance',1e-12,...
-                    'MaxIterations',n_tot*20+50,'OutputFcn',[],...
+                    'MaxIterations',n_tot*25,'OutputFcn',[],...
                     'SpecifyObjectiveGradient',true,'CheckGradients',false,...
                     'FiniteDifferenceType','central','FiniteDifferenceStepSize',1e-10);
-%                 ,...
-%                     'PlotFcn',{@optimplotx,@optimplotfval,@optimplotresnorm,@optimplotfirstorderopt}
             end
             exitflag = -1;
             if isempty(obj.X)
                 R0 = ones(n_tot,1);
             else
-                R0 = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S,obj.s_m,'UniformOutput',false));
+                R0 = [repmat(obj.X,obj.cnfg,1);cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S,obj.s_m,'UniformOutput',false))];
             end
-            ub = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_ub,obj.s_m,'UniformOutput',false));
-            lb = cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_lb,obj.s_m,'UniformOutput',false));
+            ub = [repmat(obj.X_ub,obj.cnfg,1);cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_ub,obj.s_m,'UniformOutput',false))];
+            lb = [repmat(obj.X_lb,obj.cnfg,1);cell2mat(arrayfun(@(x,b)repmat(x,b,1),obj.S_lb,obj.s_m,'UniformOutput',false))];
             while exitflag<=0
-                [R,resnorm] = lsqnonlin(@obj.res_Identification_Cascaded,R0,lb,ub,options);
-                exitflag = 1;
+                %                 obj.n_trail = obj.n_trail+1;
+                [R,resnorm] = lsqnonlin(@obj.res_Identification,R0,lb,ub,options);
                 if resnorm<1e-3
-                    continue;
+                    exitflag = 1;
+                else
+                    linear_interp = @(x,y1,y2) x.*(y2-y1)+y1;
+                    exp_interp = @(x,y1,y2) exp(linear_interp(x,log(y1),log(y2)));
+                    R0_lin = linear_interp(rand(n_tot,1),lb,ub);
+                    R0_exp = exp_interp(rand(n_tot,1),lb,ub);
+                    R0(lb>0)=R0_exp(lb>0);
+                    R0(lb<=0)=R0_lin(lb<=0);
                 end
             end
-            [~,~,cnfg_X] = obj.res_Identification_Cascaded(R);
-            MultiS = R;
+            cnfg_X = num2cell(reshape(R(1:obj.t*obj.cnfg),obj.t,obj.cnfg),1)';
+            MultiS = R((obj.cnfg*obj.t+1):end);
             obj.s_MultiS=mat2cell(MultiS,obj.s_m,1);
             %             obj.RecoverParameterIdentification(Backup);
+            function stop = Identification_TRR_outfun(x,optimValues,state)
+                persistent last_Values last_x N_slow_improvement
+                persistent delta_e delta_x
+                persistent hist_x hist_residual hist_gradient hist_trustregionradius hist_stepsize
+                stop = false;
+                switch state
+                    case 'init'
+                        last_Values = optimValues;
+                        last_x = x;
+                        N_slow_improvement = 0;
+                        delta_e = 0;
+                        delta_x = 0;
+                        
+                        hist_x = [];
+                        hist_residual = [];
+                        hist_gradient = [];
+                        hist_trustregionradius = [];
+                        hist_stepsize = [];
+                        
+                    case 'iter'
+                        delta_e = optimValues.residual-last_Values.residual;
+                        delta_x = x - last_x;
+                        
+                        hist_x = [hist_x,x];
+                        hist_residual = [hist_residual, optimValues.residual];
+                        hist_gradient = [hist_gradient, optimValues.gradient];
+                        hist_trustregionradius = [hist_trustregionradius, optimValues.trustregionradius];
+                        hist_stepsize = [hist_stepsize, optimValues.stepsize];
+                        
+                        if any(x<lb) || any(x>ub)
+                            % Algorithm goes out of the range
+                            R0 = min(max(x,lb),ub);
+                            stop = true;
+                            return
+                        end
+                        last_Values = optimValues;
+                        last_x = x;
+                        
+                        if optimValues.iteration>5 && norm(x-hist_x(:,end-4))<0.1*sum(hist_stepsize(end-3:end)) && false
+                            
+                            % Occurs zigzag moves, stop and retry with a new start along the trend
+                            x_mean = sum(hist_x(:,end-4:end),2)/5;
+                            grad_mean = sum(hist_gradient(:,end-3:end),2)/4;
+                            R0 = Move2Improve(x_mean,grad_mean, optimValues.resnorm);
+                            % R0 = hist_x(:,end-4:end)*[-2;0;-1;0.5;3.5];
+                            % R0 = 3.5*x + 0.5*hist_x(:,end-1) - hist_x(:,end-2) - 2*hist_x(:,end-4);
+                            stop = true;
+                            return
+                        end
+                        
+                        if norm(delta_e)/norm(optimValues.residual)<1e-6 && false
+                            % Descending too slow
+                            N_slow_improvement = N_slow_improvement + 1;
+                            if N_slow_improvement>10
+                                [x_new, alpha] = Move2Improve(x,optimValues);
+                                if alpha <= optimValues.trustregionradius
+                                    % can not find another point, use a random start point
+                                    x_new = [rand(obj.cnfg*obj.t,1);rand(sum(obj.s_m),1)];%.*(ub-lb)+lb;
+                                end
+                                R0 = x_new;stop = true;
+                            end
+                        else
+                            N_slow_improvement = N_slow_improvement/2;
+                        end
+                    case 'done'
+                        %                         delta_e = optimValues.residual-last_Values.residual;
+                        %                         delta_x = x - last_x;
+                        if optimValues.iteration>=options.MaxIterations && false
+                            % Algorithm exceed maximum iterations
+                            if norm(delta_e)/norm(optimValues.residual)<1e-6
+                                [x_new, alpha] = Move2Improve(x,optimValues);
+                                if alpha <= optimValues.trustregionradius
+                                    x_new = [rand(obj.cnfg*obj.t,1);rand(sum(obj.s_m),1)];
+                                end
+                            else
+                                x_new = x;
+                            end
+                            R0 = x_new;exitflag = -1;
+                        end
+                        if optimValues.resnorm>options.FunctionTolerance
+                            % Algorithm fails to find solution
+                            
+                            %plot how residual changes with x in any two dimensions
+                            for kk = 1:8
+                                kk
+                                draw_section(kk,9,abs(x(kk))*0.3,abs(x(9))*0.8,20,kk);
+                            end
+                            
+                            %                             if optimValues.trustregionradius<1e-4
+                            %                                 %trust region radius is too small, jump to a new point
+                            %                                 [x_new, alpha] = Move2Improve(x,optimValues);
+                            %                                 if alpha <= optimValues.trustregionradius
+                            %                                     % can not find another point, use a random start point
+                            %                                     x_new = [rand(obj.cnfg*obj.t,1);rand(sum(obj.s_m),1)];%.*(ub-lb)+lb;
+                            %                                 end
+                            %                             else
+                            %                                 [x_new, alpha] = Move2Improve(x,optimValues);
+                            %                             end
+                            R0 = x_new;exitflag = -1;
+                        else
+                            exitflag = 1;
+                        end
+                    otherwise
+                end
+                function [x_new, alpha] = Move2Boundary(x,gradient)
+                    pos_grad_idx=(gradient>0);
+                    alpha = min(min((x(pos_grad_idx)-lb(pos_grad_idx))./gradient(pos_grad_idx)),...
+                        min(-(ub(~pos_grad_idx)-x(~pos_grad_idx))./gradient(~pos_grad_idx)));
+                    x_new = x-gradient*alpha;
+                end
+                function [x_new, alpha] = Move2Improve(x,gradient, resnorm)
+                    [~,alpha] = Move2Boundary(x,gradient);
+                    x_new = x-gradient*alpha;
+                    while norm(obj.res_Identification(x_new))^2> resnorm
+                        alpha = alpha/2;
+                        x_new = x-gradient*alpha;
+                    end
+                end
+                function draw_section(xIdx, yIdx, xRange, yRange, MeshDensity, nfig)
+                    M = sparse([xIdx,yIdx],[1,2],1,length(x),2);
+                    hfun = @(x1,x2)sum(obj.res_Identification(x+M*[x1;x2]).^2);
+                    xVec = linspace(-xRange,xRange,MeshDensity+1);
+                    yVec = linspace(-yRange,yRange,MeshDensity+1);
+                    [xGrid,yGrid] = meshgrid(xVec, yVec);
+                    zGrid = arrayfun(hfun,xGrid,yGrid);
+                    if nargin>=6
+                        figure(nfig);
+                        clf
+                    else
+                        figure();
+                    end
+                    mesh(xGrid + x(xIdx), yGrid + x(yIdx), zGrid);
+                    drawnow();
+                end
+                
+            end
         end
         
         function [Backup] = Identification_Preprocess(obj,cnfg_s_mIdx, proc_ConfigIdx, proc_ob_Measurements, proc_ob_SensorLocation, ob_SensorType, ob_Uncertainty)
@@ -5289,6 +5505,72 @@ classdef DuctNetwork < handle
                 dCfdZ(ii)=(CfMesh(Index_up{:})-Cf)/(ZMesh{ii}(3)-ZMesh{ii}(2))/2+(CfMesh(Index_low{:})-Cf)/(ZMesh{ii}(1)-ZMesh{ii}(2))/2;
             end
             
-        end        
+            %             cell_Grad = cell(1,NZ);
+            %             if NZ>1, ZMesh([2,1])=ZMesh([1,2]);end;
+            %             [cell_Grad{:}] = gradient(CfMesh,ZMesh{:});
+            %             if NZ>1, cell_Grad([2,1])=cell_Grad([1,2]);end;
+            %             dCfdZ = cellfun(@(M)M(Index_mid{:}),cell_Grad);
+        end
+        
+        function dfdX = Jacobian(f,X0,h)
+            dfdX = cell2mat(cellfun(@(x)(f(X0(:)+x)-f(X0))/h,num2cell(h*eye(length(X0)),1),'UniformOutput',false));
+        end
+        
+        function [xCurrent, resnorm, EXITFLAG] = lsq_adam(FUN,xCurrent)
+            stepSize = 0.001;
+            beta1 = 0.9;
+            beta2 = 0.999;
+            epsilon = 1e-8;
+            nIter = 100;
+            
+            % Store the number of decision variables
+            nDecVar = length(xCurrent);
+            
+            m = zeros(nDecVar, 1);
+            v = zeros(nDecVar, 1);
+            
+            disp('Iteration  f(x)   Norm of step  1st order optimality')
+            for i = 1:nIter
+                % Get gradients w.r.t. stochastic objective at the current iteration
+                [y, JAC] = FUN(xCurrent);
+                GRAD = -JAC'*y;
+                % Update biased 1st moment estimate
+                m = beta1*m + (1-beta1)*GRAD;
+                % Update biased 2nd raw moment estimate
+                v = beta2*v + (1 - beta2)*(GRAD.^2);
+                % Compute bias-corrected 1st moment estimate
+                mHat = m./(1 - beta1^i);
+                % Compute bias-corrected 2nd raw moment estimate
+                vHat = v./(1 - beta2^i);
+                % Update decision variables
+                step = - stepSize.*mHat./(sqrt(vHat) + epsilon);
+                xCurrent = xCurrent + step;
+                fprintf('%6d   %10g  %10g  %10g\n',i, 0.5*y'*y, norm(step), norm(GRAD))
+            end
+            resnorm = 0.5*y'*y;
+            EXITFLAG = 1;
+        end
+        
+        function [xCurrent, resnorm, EXITFLAG] = lsq_gd(FUN,xCurrent)
+            stepSize = 0.0001;
+            nIter = 100;
+            
+            % Store the number of decision variables
+            nDecVar = length(xCurrent);
+            
+            disp('Iteration  f(x)   Norm of step  1st order optimality')
+            for i = 1:nIter
+                % Get gradients w.r.t. stochastic objective at the current iteration
+                [y, JAC] = FUN(xCurrent);
+                GRAD = -JAC'*y;
+                
+                % Update decision variables
+                step = - stepSize.*GRAD;
+                xCurrent = xCurrent + step;
+                fprintf('%6d   %10g  %10g  %10g\n',i, 0.5*y'*y, norm(step), norm(GRAD))
+            end
+            resnorm = 0.5*y'*y;
+            EXITFLAG = 1;
+        end
     end
 end
