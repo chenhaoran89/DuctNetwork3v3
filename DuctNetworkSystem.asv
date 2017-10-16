@@ -87,14 +87,14 @@ classdef DuctNetworkSystem < matlab.System & matlab.system.mixin.Propagates ...
         function Branch_Idx = AddBranch(obj, FromNode, ToNode, varargin)
             [~, b_Curr]=size(obj.A);
             Branch_Idx = b_Curr+1;
-            SetNode(obj, FromNode, Branch_Idx, 1);
-            SetNode(obj, ToNode, Branch_Idx, -1);
+            SetNode(FromNode, 1);
+            SetNode(ToNode, -1);
             [obj.n,obj.b]=size(obj.A);
             obj.U = 1e-1*null(obj.A);
             obj.t = size(obj.U,2);
             obj.X = ones(obj.t,1);
-%             obj.X_lb = -1e12*ones(obj.t,1);
-%             obj.X_ub = 1e12*ones(obj.t,1);
+            obj.X_lb = -1e12*ones(obj.t,1);
+            obj.X_ub = 1e12*ones(obj.t,1);
             obj.b_Pdrop{Branch_Idx,1}=cell(0,1);
             obj.b_dPdQ{Branch_Idx,1}=cell(0,1);
             obj.b_dPdS{Branch_Idx,1}=cell(0,1);
@@ -104,7 +104,7 @@ classdef DuctNetworkSystem < matlab.System & matlab.system.mixin.Propagates ...
             if nargin>3
                 obj.AddFitting(Branch_Idx,varargin{:});
             end
-            function SetNode(obj, Node, Branch_Idx, a)
+            function SetNode(Node, a)
                 if ischar(Node), Node = find(cellfun(@(S)strcmp(S,Node), obj.n_NodeDescription),1); end
                 if isempty(Node), Node=0; end
                 if Node>0, obj.A(Node,Branch_Idx) = a; end
@@ -162,11 +162,11 @@ classdef DuctNetworkSystem < matlab.System & matlab.system.mixin.Propagates ...
                         obj.b_Sidx{PrimaryBranch}{end+1} = reshape(ParamList,[],1);
                     end
                     obj.S(Param_Idx(1:length(Param)),1) = Param;
-%                     obj.S_scale(Param_Idx(1:length(Param)),1) = Param;
-%                     obj.S_ub(Param_Idx,1) = Model('Parameter_UpperBound');
-%                     obj.S_lb(Param_Idx,1) = Model('Parameter_LowerBound');
-%                     obj.s_m(Param_Idx,1) = Model('Is_Identified_Parameter');
-%                     obj.s_MultiS(Param_Idx(1:length(Param)),1) = arrayfun(@(a,idx)a*ones(1,obj.s_m(idx)),Param,Param_Idx(1:length(Param)),'UniformOutput',false);
+                    obj.S_scale(Param_Idx(1:length(Param)),1) = Param;
+                    obj.S_ub(Param_Idx,1) = Model('Parameter_UpperBound');
+                    obj.S_lb(Param_Idx,1) = Model('Parameter_LowerBound');
+                    obj.s_m(Param_Idx,1) = Model('Is_Identified_Parameter');
+                    obj.s_MultiS(Param_Idx(1:length(Param)),1) = arrayfun(@(a,idx)a*ones(1,obj.s_m(idx)),Param,Param_Idx(1:length(Param)),'UniformOutput',false);
                 else
                     ParamDescription = Model('Parameter_Description');
                     bShared = Model('Is_Shared_Parameter');
@@ -198,13 +198,14 @@ classdef DuctNetworkSystem < matlab.System & matlab.system.mixin.Propagates ...
                     obj.b_Sidx{PrimaryBranch}{end+1} = reshape(Param_Idx,[],1);
                     
                     obj.S(Param_Idx(1:length(Param)),1) = Param;
-%                     obj.S_ub(Param_Idx,1) = Model('Parameter_UpperBound');
-%                     obj.S_lb(Param_Idx,1) = Model('Parameter_LowerBound');
-%                     obj.s_m(Param_Idx,1) = Model('Is_Identified_Parameter');
-%                     obj.s_MultiS(Param_Idx(1:length(Param)),1) = arrayfun(@(a,idx)a*ones(1,obj.s_m(idx)),Param, Param_Idx(1:length(Param)),'UniformOutput',false);
+                    obj.S_ub(Param_Idx,1) = Model('Parameter_UpperBound');
+                    obj.S_lb(Param_Idx,1) = Model('Parameter_LowerBound');
+                    obj.s_m(Param_Idx,1) = Model('Is_Identified_Parameter');
+                    obj.s_MultiS(Param_Idx(1:length(Param)),1) = arrayfun(@(a,idx)a*ones(1,obj.s_m(idx)),Param, Param_Idx(1:length(Param)),'UniformOutput',false);
                 end
             elseif ischar(Model)
-                obj.AddFitting(Branch,str2func(['Fittings.',Model]),Param);
+                Model = DuctNetwork.FittingDatabase(Model);
+                obj.AddFitting(Branch,Model,Param);
             elseif iscell(Model)
                 cellfun(@(a,b)obj.AddFitting(Branch,a,b),Model,Param);
             end
@@ -224,16 +225,16 @@ classdef DuctNetworkSystem < matlab.System & matlab.system.mixin.Propagates ...
                 Param_Idx = obj.s;
                 obj.s_ParamDescription{Param_Idx,1} = Description;
                 obj.S(Param_Idx,1) = ParamValue;
-%                 obj.S_scale(Param_Idx,1) = ParamValue;
-%                 obj.S_ub(Param_Idx,1) = ParamUpperBound;
-%                 obj.S_lb(Param_Idx,1) = ParamLowerBound;
-%                 if nargin>=6
-%                     obj.s_m(Param_Idx,1) = varargin{1};
-%                     obj.s_MultiS{Param_Idx,1} = ParamValue*ones(1,varargin{1});
-%                 else
-%                     obj.s_m(Param_Idx,1) = 0;
-%                     obj.s_MultiS{Param_Idx,1} = [];
-%                 end
+                obj.S_scale(Param_Idx,1) = ParamValue;
+                obj.S_ub(Param_Idx,1) = ParamUpperBound;
+                obj.S_lb(Param_Idx,1) = ParamLowerBound;
+                if nargin>=6
+                    obj.s_m(Param_Idx,1) = varargin{1};
+                    obj.s_MultiS{Param_Idx,1} = ParamValue*ones(1,varargin{1});
+                else
+                    obj.s_m(Param_Idx,1) = 0;
+                    obj.s_MultiS{Param_Idx,1} = [];
+                end
             end
         end
         
